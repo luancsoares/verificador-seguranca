@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 import socket
 import ssl
-
 import requests
+import whois
 
 
 HEADERS_IMPORTANTES = [
@@ -12,8 +12,6 @@ HEADERS_IMPORTANTES = [
     "X-Content-Type-Options",
     "Referrer-Policy",
 ]
-
-
 def verificar_headers(url):
     try:
         resposta = requests.get(url, timeout=10)
@@ -26,8 +24,8 @@ def verificar_headers(url):
 
     for header in HEADERS_IMPORTANTES:
         if header in resposta.headers:
-            print("✅", header)
-            pontos += 1
+            print("✅", header, resposta.headers[header])
+            pontos +=1
         else:
             print("❌", header, "(faltando)")
 
@@ -72,6 +70,34 @@ def verificar_tls(site):
     except (OSError, ssl.SSLError) as erro:
         print("Falha na conexão TLS ou na validação do certificado:", erro)
 
+def verificar_whois(site):
+    try:
+        info = whois.whois(site)
+        print("Domínio:", info.domain_name)
+        print("Registrar:", info.registrar)
+        print("Data de criação:", info.creation_date)
+        print("Data de expiração:", info.expiration_date)
+        print("Status:", info.status)
+    except Exception as erro:
+        print("Falha ao obter informações WHOIS:", erro)
+
+def verificar_ip(site):
+    try:
+        ip = socket.gethostbyname(site)
+        print("Endereço IP:", ip)
+    except socket.gaierror as erro:
+        print("Falha ao resolver o domínio para IP:", erro)
+
+def verificar_dns(site):
+    try:
+        import dns.resolver
+
+        respostas = dns.resolver.resolve(site, "A")
+        print("Registros DNS A:")
+        for resposta in respostas:
+            print("-", resposta.to_text())
+    except Exception as erro:
+        print("Falha ao consultar registros DNS:", erro)
 
 def main():
     site = input("Qual site? Digite apenas o domínio: ").strip()
@@ -85,7 +111,9 @@ def main():
     print("Nota dos headers:", pontos, "de", len(HEADERS_IMPORTANTES))
 
     verificar_tls(site)
-
+    verificar_whois(site)
+    verificar_ip(site)
+    verificar_dns(site)
 
 if __name__ == "__main__":
     main()
