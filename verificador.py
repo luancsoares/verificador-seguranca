@@ -1,119 +1,153 @@
-from datetime import datetime, timezone
+"""
+Verificador de Segurança — versão orientada a objetos (GABARITO)
+
+Tente fazer o exercício antes de abrir este arquivo!
+
+Conceitos usados:
+- Abstração      -> classe base Verificacao (só diz O QUE fazer: executar)
+- Herança        -> cada checagem herda de Verificacao
+- Polimorfismo   -> o Verificador chama v.executar() sem saber qual classe é
+- Encapsulamento -> métodos/atributos com "_" são de uso interno da classe
+
+Dependências: pip install requests python-whois
+"""
+
 import socket
 import ssl
+from datetime import datetime, timezone
+
 import requests
-import whois
 
 
-HEADERS_IMPORTANTES = [
-    "Strict-Transport-Security",
-    "Content-Security-Policy",
-    "X-Frame-Options",
-    "X-Content-Type-Options",
-    "Referrer-Policy",
-]
-def verificar_headers(url):
-    try:
-        resposta = requests.get(url, timeout=10)
-    except requests.RequestException as erro:
-        print("Falha ao acessar o site:", erro)
-        return 0
+# ----------------------------------------------------------------------
+# ABSTRAÇÃO: a classe base define o "contrato" que toda checagem segue
+# ----------------------------------------------------------------------
+class Verificacao:
+    nome = "Verificação genérica"
 
-    print("Status HTTP:", resposta.status_code)
-    pontos = 0
+    def executar(self, site):
+        """Deve devolver um dicionário: {"status": ..., "detalhe": ...}
+        status pode ser "ok", "atencao" ou "critico"."""
+        raise NotImplementedError("Cada verificação precisa implementar executar()")
 
-    for header in HEADERS_IMPORTANTES:
-        if header in resposta.headers:
-            print("✅", header, resposta.headers[header])
-            pontos +=1
+    def emoji(self, status):
+        return {"ok": "🟢", "atencao": "🟡", "critico": "🔴"}[status]
+
+
+# ----------------------------------------------------------------------
+# HERANÇA: cada checagem "é uma" Verificacao
+# ----------------------------------------------------------------------
+class VerificacaoHeaders(Verificacao):
+    nome = "Headers de segurança"
+
+    # atributo de classe: a lista é a mesma para todos os objetos
+    HEADERS = [
+        "Strict-Transport-Security",
+        "Content-Security-Policy",
+        "X-Frame-Options",
+        "X-Content-Type-Options",
+        "Referrer-Policy",
+    ]
+
+    def executar(self, site):
+        resposta = requests.get(f"https://{site}", timeout=10)
+        presentes = [h for h in self.HEADERS if h in resposta.headers]
+        pontos = len(presentes)
+
+        if pontos >= 4:
+            status = "ok"
+        elif pontos >= 2:
+            status = "atencao"
         else:
-            print("❌", header, "(faltando)")
+            status = "critico"
 
-    return pontos
+        return {"status": status, "detalhe": f"{pontos}/5 headers presentes"}
 
 
-def verificar_tls(site):
-    contexto = ssl.create_default_context()
+class VerificacaoCertificado(Verificacao):
+    nome = "Certificado TLS"
 
-    try:
-        with socket.create_connection((site, 443), timeout=10) as conexao:
-            with contexto.wrap_socket(
-                conexao,
-                server_hostname=site,
-            ) as tls:
-                print("TLS negociado:", tls.version())
-                print("Cifra:", tls.cipher()[0])
+    # ENCAPSULAMENTO: método interno (o "_" avisa: não chame de fora)
+    def _dias_restantes(self, site):
+        contexto = ssl.create_default_context()
+        with socket.create_connection((site, 443), timeout=10) as sock:
+            with contexto.wrap_socket(sock, server_hostname=site) as conexao:
+                cert = conexao.getpeercert()
+        expira = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+        expira = expira.replace(tzinfo=timezone.utc)
+        return (expira - datetime.now(timezone.utc)).days
 
-                certificado = tls.getpeercert()
-                validade = datetime.fromtimestamp(
-                    ssl.cert_time_to_seconds(certificado["notAfter"]),
-                    tz=timezone.utc,
-                )
+    def executar(self, site):
+        try:
+            dias = self._dias_restantes(site)
+        except ssl.SSLCertVerificationError:
+            return {"status": "critico", "detalhe": "certificado inválido ou expirado"}
 
-                dias_restantes = (
-                    validade - datetime.now(timezone.utc)
-                ).total_seconds() / 86400
+        if dias < 7:
+            status = "critico"
+        elif dias < 30:
+            status = "atencao"
+        else:
+            status = "ok"
+        return {"status": status, "detalhe": f"expira em {dias} dias"}
 
-                print(
-                    "Certificado vence em:",
-                    validade.strftime("%d/%m/%Y %H:%M UTC"),
-                )
-                print(f"Dias restantes: {dias_restantes:.1f}")
 
-                if dias_restantes <= 0:
-                    print("❌ Certificado vencido")
-                elif dias_restantes <= 30:
-                    print("⚠️ Certificado vence em até 30 dias")
-                else:
-                    print("✅ Certificado válido por mais de 30 dias")
+class VerificacaoWhois(Verificacao):
+    nome = "Idade do domínio (WHOIS)"
 
-    except (OSError, ssl.SSLError) as erro:
-        print("Falha na conexão TLS ou na validação do certificado:", erro)
+    def executar(self, site):
+        import whois  # pacote python-whois
 
-def verificar_whois(site):
-    try:
-        info = whois.whois(site)
-        print("Domínio:", info.domain_name)
-        print("Registrar:", info.registrar)
-        print("Data de criação:", info.creation_date)
-        print("Data de expiração:", info.expiration_date)
-        print("Status:", info.status)
-    except Exception as erro:
-        print("Falha ao obter informações WHOIS:", erro)
+        dados = whois.whois(site)
+        criado = dados.creation_date
+        if isinstance(criado, list):  # alguns registros devolvem várias datas
+            criado = criado[0]
+        if criado is None:
+            return {"status": "atencao", "detalhe": "data de criação não informada"}
 
-def verificar_ip(site):
-    try:
+        if criado.tzinfo is None:
+            criado = criado.replace(tzinfo=timezone.utc)
+        idade = (datetime.now(timezone.utc) - criado).days
+
+        if idade < 30:
+            return {"status": "critico", "detalhe": f"domínio com {idade} dias (possível phishing)"}
+        return {"status": "ok", "detalhe": f"domínio com {idade} dias"}
+
+
+class VerificacaoIP(Verificacao):
+    nome = "IP e localização"
+
+    def executar(self, site):
         ip = socket.gethostbyname(site)
-        print("Endereço IP:", ip)
-    except socket.gaierror as erro:
-        print("Falha ao resolver o domínio para IP:", erro)
+        info = requests.get(f"https://ipinfo.io/{ip}/json", timeout=10).json()
+        local = f"{info.get('city', '?')}, {info.get('country', '?')}"
+        return {"status": "ok", "detalhe": f"{ip} — {local} — {info.get('org', '?')}"}
 
-def verificar_dns(site):
-    try:
-        import dns.resolver
 
-        respostas = dns.resolver.resolve(site, "A")
-        print("Registros DNS A:")
-        for resposta in respostas:
-            print("-", resposta.to_text())
-    except Exception as erro:
-        print("Falha ao consultar registros DNS:", erro)
+# ----------------------------------------------------------------------
+# POLIMORFISMO: o Verificador não sabe (nem precisa saber) qual
+# checagem está rodando. Só chama executar().
+# ----------------------------------------------------------------------
+class Verificador:
+    def __init__(self, verificacoes):
+        self._verificacoes = verificacoes  # encapsulado: lista interna
 
-def main():
-    site = input("Qual site? Digite apenas o domínio: ").strip()
+    def analisar(self, site):
+        print(f"\n🔍 Analisando {site}\n" + "-" * 40)
+        for v in self._verificacoes:
+            try:
+                r = v.executar(site)
+            except Exception as erro:  # uma falha não derruba as outras checagens
+                r = {"status": "atencao", "detalhe": f"erro: {erro}"}
+            print(f"{v.emoji(r['status'])} {v.nome}: {r['detalhe']}")
 
-    if not site:
-        print("Informe um domínio.")
-        return
-
-    url = "https://" + site
-    pontos = verificar_headers(url)
-    print("Nota dos headers:", pontos, "de", len(HEADERS_IMPORTANTES))
-
-    verificar_tls(site)
-    verificar_whois(site)
-    verificar_ip(site)
-    verificar_dns(site)
 
 if __name__ == "__main__":
-    main()
+    site = input("Digite o domínio (ex.: google.com): ").strip()
+    verificador = Verificador([
+        VerificacaoHeaders(),
+        VerificacaoCertificado(),
+        VerificacaoWhois(),
+        VerificacaoIP(),
+    ])
+    verificador.analisar(site)
